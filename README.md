@@ -14,6 +14,11 @@ team. **It never merges, creates, updates or pays anything.** The team decides.
 
 Synthetic data only. USD only. Local DuckDB only. The design is in [docs/design.md](docs/design.md).
 
+## Status
+
+PRs 1-5 merged. Real runs done on a laptop (local embedding model + Claude); results are under
+[Results](#results).
+
 ## The four AI ideas
 
 1. **Embeddings.** Names and addresses become vectors (small local model,
@@ -131,16 +136,38 @@ because the names are equal.
 
 ### Real runs (local embedding model + Claude)
 
-| Held-out split | exact | fuzzy | embed | routed | sonnet-only |
+Local embedder `all-MiniLM-L6-v2`. Thresholds tuned on dev only: T_HIGH 0.99, T_LOW 0.42
+(0 dev duplicates below it); the middle band holds 36 of 62 dev rows.
+
+Held-out split: 58 SAP vendors, 24 planted duplicates, $557,223.80 planted exposure.
+
+| Held-out split | exact | fuzzy | embed-only | routed | sonnet-only |
 |---|---|---|---|---|---|
-| Wrong merges | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| Duplicate recall | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| Match precision | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| NEEDS_HUMAN rate | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| Routing share (rules / Haiku / Sonnet / human) | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| Cost per SAP vendor | $0 | $0 | $0 | fill in after local run | fill in after local run |
-| Dollars exposed: found / planted | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
-| Dollars under review | fill in after local run | fill in after local run | fill in after local run | fill in after local run | fill in after local run |
+| Wrong merges | 0 | 0 | 0 | 0 | 0 |
+| Duplicates found | 14/24 | 18/24 | 17/24 | 23/24 | 22/24 |
+| Duplicates missed to NEW | 10 | 6 | 0 | 0 | 0 |
+| Fraud flags caught | 0/2 | 0/2 | 2/2 | 2/2 | 2/2 |
+| Sent to a person | 12.1% | 12.1% | 70.7% | 17.2-20.7% | 15.5% |
+| Dollars exposed found | $336,217.78 | $394,835.33 | $422,880.56 | $545,017.79 | $505,123.91 |
+| Cost, total | $0 | $0 | $0 | about $0.024 | $0.124 |
+
+- Routed, who decided (run 1): rules 24, Haiku 28, Sonnet 1, person 5. Calls: Haiku 34,
+  Sonnet 2. 0 answers cut off at max_tokens.
+- Routed, 3 fresh runs: 0 wrong merges, 23/24 found and 0 missed to NEW in all 3; NEW handled
+  21-23 of 25; sent to a person 17.2-20.7%; cost $0.0236-$0.0244.
+- Dev, routed: 0 wrong merges, 26/27 found, cost $0.022.
+- Red-team (8 vendors): 0 wrong merges, 8/8 outcomes allowed by the plan, 1 real duplicate sent
+  to a person.
+- Embedding cache: the second run computed 0 embeddings.
+
+**What the numbers show**
+- Name matching never made a wrong merge, but missed 6-10 duplicates that would be loaded twice,
+  and both same-bank / different-tax-ID fraud cases.
+- Embeddings alone missed nothing but sent 71% of vendors to a person.
+- Routing settled most of the unclear middle with Haiku; Sonnet decided 1 vendor. About 5x
+  cheaper than sending the middle band to Sonnet, with one more duplicate found.
+- The real embedder needed a much lower T_LOW than the test embedder (0.42 vs 0.68) to keep every
+  dev duplicate out of NEW; the cheap first model is what makes that affordable.
 
 `reports/compare_heldout.md` gives the full table after the runs below.
 
@@ -234,8 +261,12 @@ python -m pytest -q
 - The embedding model is small and runs locally. A bigger model may separate lookalikes better.
 - Thresholds are tuned on the dev split only; the held-out and red-team splits are never used for
   tuning. With about 60 rows per split, one row moves a percentage by 1-2 points.
-- The sandbox numbers above use a test embedder, not the real model. The real-run table is empty
-  until it is run on a laptop with the model and an API key.
+- The sandbox numbers above use a test embedder, not the real model. The real-run numbers come
+  from 3 runs on a laptop; the model's answers vary a little from run to run, so routed results
+  are given as a range.
+- TAX_CONFLICT lookalikes that the judge calls DIFFERENT end as NEW (allowed by the plan). They
+  now keep the flag on the row ("closest Fusion supplier has a different tax ID") so the
+  reviewer still sees it.
 - The output is a suggestion. Nothing here touches SAP or Fusion.
 
 ## Layout
