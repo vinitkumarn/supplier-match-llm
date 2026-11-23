@@ -1,0 +1,7 @@
+duckdb>=1.1
+pydantic>=2.7
+anthropic>=0.40
+python-dotenv>=1.0
+numpy>=1.26
+pytest>=8.0
+# The embedding model is optional: python -m pip install -e ".[embed]"

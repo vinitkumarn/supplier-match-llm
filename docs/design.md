@@ -21,26 +21,32 @@ reasons and flags, and writes a merge proposal for the Supplier Master team. It 
 |---|---|---|
 | fusion_suppliers | POZ_SUPPLIERS + HZ_PARTIES | vendor_id, party_id, vendor_name, segment1 (supplier number), tax_id, country |
 | fusion_sites | POZ_SUPPLIER_SITES_ALL_M | vendor_id, address_line1, city, state, postal_code, country |
-| fusion_bank | IBY_EXT_BANK_ACCOUNTS (+ instrument uses) | vendor_id, bank_name, account_number (raw, synthetic), last4 |
+| fusion_bank | IBY_EXT_BANK_ACCOUNTS (+ instrument uses) | vendor_id, country, bank_key (routing / sort code / BLZ / IFSC style, synthetic), bank_name, account_number (raw, synthetic), last4 |
 | fusion_open_ap | AP_PAYMENT_SCHEDULES_ALL | vendor_id, invoice_num, amount_remaining |
 | sap_lfa1 | SAP LFA1 vendor master | LIFNR, NAME1, NAME2, STRAS, ORT01, REGIO, PSTLZ, LAND1, STCD1 (tax) |
-| sap_lfbk | SAP LFBK vendor bank | LIFNR, BANKS (country), BANKL (bank key), BANKN (account, raw synthetic) |
+| sap_lfbk | SAP LFBK vendor bank | LIFNR, BANKS (country), BANKL (bank key), BANKN (account, raw synthetic); bank identity = BANKS + BANKL + BANKN |
 | sap_open_items | SAP BSIK open items | LIFNR, BELNR, DMBTR (amount) |
 
 About 200 Fusion suppliers and 120 SAP vendors (+ a red-team set). Countries: US, CA, GB, DE, IN.
-Tax ID and bank formats differ on purpose between systems (dashes, spaces, leading zeros).
+Tax ID and bank formats differ on purpose between systems (dashes, spaces, leading zeros,
+country prefix on tax IDs).
 
 ## Normalization (Python, deterministic)
 Uppercase; strip punctuation; collapse spaces; remove legal suffixes (INC, INCORPORATED, LLC,
 LTD, LIMITED, CORP, CORPORATION, CO, GMBH, AG, PVT, PLC); standard street words (STREET -> ST,
-AVENUE -> AVE, ROAD -> RD, SUITE -> STE); tax ID and bank account to digits/letters only.
+AVENUE -> AVE, ROAD -> RD, SUITE -> STE); tax ID, bank key and bank account to digits/letters only
+(uppercase, leading zeros removed). Tax ID: if it starts with the vendor's own 2-letter country
+code (e.g. GB, DE, IN) that prefix is removed before comparing ("GB 123456789" == "123456789" for a
+GB vendor). Bank identity = normalized country + bank key + account number (account numbers are
+only unique within one bank).
 Embedding text = normalized "name | address | city | country".
 
 ## Candidates and features (Python)
 - Blocking: compare only within the same country.
 - Top 5 Fusion candidates per SAP vendor by cosine similarity of embeddings.
 - Features per candidate: name_cosine, full_cosine, tax_id (SAME / DIFFERENT / MISSING),
-  bank (SAME / DIFFERENT / MISSING, by normalized account number), postal_equal.
+  bank (SAME / DIFFERENT / MISSING, by normalized country + bank key + account number; the same
+  account number at a different bank is DIFFERENT), postal_equal.
 
 ## Decision rules (Python owns every decision; thresholds in config, Supplier Master owns)
 1. FRAUD: bank SAME and tax_id DIFFERENT (both present) -> NEEDS_HUMAN, FRAUD_FLAG. No model.
