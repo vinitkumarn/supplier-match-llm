@@ -1,4 +1,4 @@
-"""Command line: python -m suppmatch build | tune | eval"""
+"""Command line: python -m suppmatch build | tune | eval | propose | compare"""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ from . import config
 from .db import load_all
 from .embed import get_embedder
 from .audit import AuditLog
-from .evaluate import METHODS, MODEL_METHODS, SPLITS, evaluate, summary_lines
+from .compare import compare
+from .evaluate import METHODS, MODEL_METHODS, SPLITS, evaluate, run_method, select_rows, summary_lines
 from .generator import generate, load_plan
 from .judge import Judge, ResponseCache
+from .proposal import build_rows, totals, write_proposal
 from .records import load_records
 from .tune import tune, write_outputs
 
@@ -99,6 +101,34 @@ def cmd_eval(args: argparse.Namespace) -> None:
         print(f"Audit trail: {judge.audit.path}; full errors in {config.LOG_DIR / 'suppmatch.log'}")
 
 
+def cmd_propose(args: argparse.Namespace) -> None:
+    records, plan = _inputs()
+    _setup_logging()
+    needs_embedder = args.method == "embed" or args.method in MODEL_METHODS
+    embedder = get_embedder(args.embedder, use_cache=not args.no_cache) if needs_embedder else None
+    judge = _make_judge(args) if args.method in MODEL_METHODS else None
+    t_low, t_high, source = config.thresholds(args.embedder)
+    rows = select_rows(plan, args.split, args.limit)   # the plan only picks the split's rows
+    try:
+        decisions = run_method(args.method, records, rows, embedder, t_low, t_high, judge)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    prows = build_rows(decisions, records)
+    csv_path, md_path = write_proposal(prows, args.method, args.split)
+    t = totals(prows)
+    print(f"Proposal {args.method} on {args.split}: {t['rows']} SAP vendors "
+          f"(MATCH {t['MATCH']}, NEW {t['NEW']}, NEEDS_HUMAN {t['NEEDS_HUMAN']})")
+    if embedder is not None:
+        print(f"  embedder {args.embedder}; T_LOW {t_low:.2f} T_HIGH {t_high:.2f} from {source}")
+    print(f"  dollars exposed (suggested MATCH): ${t['dollars_exposed']:,.2f}")
+    print(f"  dollars under review (NEEDS_HUMAN): ${t['dollars_under_review']:,.2f}")
+    print(f"Wrote {csv_path} and {md_path}. Suggestions only: nothing is merged.")
+
+
+def cmd_compare(args: argparse.Namespace) -> None:
+    print(f"Wrote {compare(args.split)}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m suppmatch")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -118,6 +148,18 @@ def main(argv: list[str] | None = None) -> None:
     ev.add_argument("--embedder", choices=["local", "fake"], default="local")
     ev.add_argument("--no-cache", action="store_true", help="do not read or write the embedding or response cache")
     ev.set_defaults(func=cmd_eval)
+
+    pr = sub.add_parser("propose", help="write the merge proposal (csv + md) for review")
+    pr.add_argument("--method", choices=METHODS, default="routed")
+    pr.add_argument("--split", choices=SPLITS, default="dev")
+    pr.add_argument("--limit", type=int, default=None, help="only the first N SAP vendors of the split")
+    pr.add_argument("--embedder", choices=["local", "fake"], default="local")
+    pr.add_argument("--no-cache", action="store_true", help="do not read or write the embedding or response cache")
+    pr.set_defaults(func=cmd_propose)
+
+    cmp_p = sub.add_parser("compare", help="all methods side by side, from the eval JSON files")
+    cmp_p.add_argument("--split", choices=SPLITS, default="dev")
+    cmp_p.set_defaults(func=cmd_compare)
 
     args = parser.parse_args(argv)
     args.func(args)

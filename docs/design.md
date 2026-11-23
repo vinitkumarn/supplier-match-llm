@@ -74,9 +74,12 @@ Two candidates both above T_HIGH with no tax/bank tie-break -> NEEDS_HUMAN (AMBI
 - MATCH rows: SAP LIFNR -> Fusion vendor_id; survivor = the Fusion record (system of record);
   list field differences for review; a SAP bank account not already on Fusion is never copied:
   "verify by call-back to the number on file before adding" (Project 3 rule).
-- Dollars exposed to double payment = SAP open items + Fusion open AP for each MATCH or
-  NEEDS_HUMAN pair. Reported in total and per row.
-- Output: reports/proposal_<split>.csv and .md. Nothing is written to any system.
+- Two dollar amounts, kept apart and never added together (both per row and in total):
+  - dollars exposed (to double payment) = SAP open items + Fusion open AP for each suggested
+    MATCH pair (likely duplicates).
+  - dollars under review = SAP open items + Fusion open AP for each NEEDS_HUMAN pair with a
+    Fusion vendor (unresolved; a person decides).
+- Output: reports/proposal_<method>_<split>.csv and .md. Nothing is written to any system.
 
 ## Eval
 Plan file with every SAP vendor labeled: expected outcome (MATCH + fusion_vendor_id / NEW /
@@ -88,7 +91,8 @@ for the cost comparison).
 Metrics: wrong merges (MATCH to the wrong vendor, or MATCH where NEW was right) - the key
 number, target 0; duplicate recall; match precision; NEW accuracy; NEEDS_HUMAN rate; fraud and
 conflict flags caught; routing share (rules / Haiku / Sonnet / human); cost per SAP vendor vs
-sonnet-only; embeddings computed vs cache hits; dollars exposed on duplicates found vs planted.
+sonnet-only; embeddings computed vs cache hits; dollars exposed on duplicates suggested MATCH
+(found vs planted) and, separately, dollars under review on NEEDS_HUMAN pairs.
 Threshold tuning: a small grid on the dev split; pick T_HIGH / T_LOW that maximize recall with
 dev precision >= 0.98; write reports/thresholds.md; held-out numbers reported with those values.
 
