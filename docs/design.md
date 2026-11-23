@@ -65,7 +65,10 @@ Two candidates both above T_HIGH with no tax/bank tie-break -> NEEDS_HUMAN (AMBI
 - Output (pydantic, extra="forbid"): verdict (SAME | DIFFERENT | UNSURE), evidence (list of
   {record: SAP | FUSION, field, quote}), reason. No MATCH/NEW/NEEDS_HUMAN, no flags, no dollars.
 - Guards: every quote is an exact substring of that record's field; field name exists; schema
-  valid (one retry with the full error); any failure -> NEEDS_HUMAN.
+  valid (one retry with the full error); SAME needs at least one quote from the SAP record AND one
+  from the FUSION record; DIFFERENT needs at least one quote; any failure -> NEEDS_HUMAN.
+- max_tokens 4000 per call (thinking tokens count toward it); a call stopped at max_tokens is an
+  invalid answer. The eval counts max_tokens stops per tier.
 
 ## Proposal and dollars (Python)
 - MATCH rows: SAP LIFNR -> Fusion vendor_id; survivor = the Fusion record (system of record);

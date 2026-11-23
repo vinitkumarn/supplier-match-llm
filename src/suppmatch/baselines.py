@@ -55,5 +55,6 @@ def embed_only(cands: list[Candidate], t_low: float, t_high: float) -> Decision:
     d = decide(cands, t_low, t_high)
     if d.needs_judge:
         d.outcome = NEEDS_HUMAN
+        d.route = "human"
         d.reasons.append("embed-only: middle band goes to a person")
     return d

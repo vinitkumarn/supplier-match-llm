@@ -44,7 +44,7 @@ description instead of silently changing it.
   text is never embedded twice; (2) response cache keyed by sha256(model + prompt version +
   packet); never cache errors or invalid answers; guards run on hits; --no-cache.
 - LLM: Anthropic Claude. SUPPMATCH_MODEL_CHEAP (default claude-haiku-5-5),
-  SUPPMATCH_MODEL_STRONG (default claude-sonnet-5-5). max_tokens 2000, system prompt with
+  SUPPMATCH_MODEL_STRONG (default claude-sonnet-5-5). max_tokens 4000 (thinking counts toward it), system prompt with
   cache_control, one retry with the full validation error, full error messages in logs.
 
 ## Working rules
