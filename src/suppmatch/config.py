@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,8 +14,9 @@ load_dotenv()
 SEED = 42
 
 # --- Matching thresholds (owned by Supplier Master) ------------------------
-# Placeholders. PR 2 tunes them on the dev split only (precision first:
-# a wrong merge is worse than a missed duplicate) and reports held-out numbers.
+# Placeholders, used only until `python -m suppmatch tune --embedder <name>` has written
+# data/thresholds_<name>.json (tuned on the dev split only; precision first: a wrong merge
+# is worse than a missed duplicate). Each embedder has its own scale, so its own file.
 T_LOW = 0.60   # best full_cosine below this (and tax_id not SAME) -> NEW
 T_HIGH = 0.90  # tax_id SAME and full_cosine at or above this -> MATCH
 TOP_K = 5      # Fusion candidates kept per SAP vendor
@@ -33,3 +35,17 @@ PLAN_PATH = DATA_DIR / "plan.json"
 DB_PATH = DATA_DIR / "suppmatch.duckdb"
 CACHE_DIR = DATA_DIR / "cache"
 REPORTS_DIR = BASE_DIR / "reports"
+
+
+def thresholds_path(embedder: str, data_dir: Path | None = None) -> Path:
+    return Path(data_dir or DATA_DIR) / f"thresholds_{embedder}.json"
+
+
+def thresholds(embedder: str, data_dir: Path | None = None) -> tuple[float, float, str]:
+    """(T_LOW, T_HIGH, source) for this embedder: the tuned file if present, else placeholders."""
+    path = thresholds_path(embedder, data_dir)
+    if path.exists():
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+        return float(data["t_low"]), float(data["t_high"]), str(path.name)
+    return T_LOW, T_HIGH, "placeholder (config.py)"
