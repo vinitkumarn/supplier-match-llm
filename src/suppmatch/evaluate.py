@@ -17,9 +17,13 @@ from .baselines import embed_only, exact, fuzzy
 from .candidates import build_candidates
 from .decide import MATCH, NEEDS_HUMAN, NEW, Decision
 from .embed import CachedEmbedder
+from .judge import PROMPT_VERSION, ROUTED, SONNET_ONLY, Judge
 from .records import Records
 
-METHODS = ("exact", "fuzzy", "embed")
+MODEL_METHODS = (ROUTED, SONNET_ONLY)
+METHODS = ("exact", "fuzzy", "embed") + MODEL_METHODS
+ROUTES = ("rules", "haiku", "sonnet", "human")
+TIERS = ("haiku", "sonnet")
 SPLITS = ("dev", "heldout", "redteam")
 
 
@@ -29,7 +33,7 @@ def select_rows(plan: dict, split: str, limit: int | None = None) -> list[str]:
 
 
 def run_method(method: str, records: Records, lifnrs: list[str], embedder: CachedEmbedder | None,
-               t_low: float, t_high: float) -> dict[str, Decision]:
+               t_low: float, t_high: float, judge: Judge | None = None) -> dict[str, Decision]:
     saps = {k: records.sap[k] for k in lifnrs}
     if method == "exact":
         return {k: exact(s, records.fusion) for k, s in saps.items()}
@@ -40,6 +44,11 @@ def run_method(method: str, records: Records, lifnrs: list[str], embedder: Cache
             raise ValueError("embed method needs an embedder")
         cands = build_candidates(saps, records.fusion, embedder)
         return {k: embed_only(cands[k], t_low, t_high) for k in saps}
+    if method in MODEL_METHODS:
+        if embedder is None or judge is None:
+            raise ValueError(f"{method} method needs an embedder and a judge")
+        cands = build_candidates(saps, records.fusion, embedder)
+        return {k: judge.decide(s, cands[k], t_low, t_high, method) for k, s in saps.items()}
     raise ValueError(f"unknown method {method!r} (use {', '.join(METHODS)})")
 
 
@@ -77,6 +86,10 @@ class Metrics:
     dollars_found: Decimal
     by_group: dict[str, Counter] = field(default_factory=dict)
     misses: list[str] = field(default_factory=list)
+    calls: Counter = field(default_factory=Counter)        # real API calls per tier (retries included)
+    cache_hits: Counter = field(default_factory=Counter)   # response-cache answers per tier
+    max_tokens_stops: Counter = field(default_factory=Counter)  # calls cut off at max_tokens, per tier
+    cost: Decimal | None = Decimal("0")                    # None if a model has no price
 
     @property
     def recall(self) -> float | None:
@@ -94,7 +107,12 @@ def score(decisions: dict[str, Decision], plan: dict, records: Records) -> Metri
         lab = labels[k]
         group = lab["group"]
         m.by_group.setdefault(group, Counter())[d.outcome or "NEEDS_JUDGE"] += 1
-        m.routing["middle band -> human" if d.rule == "NEEDS_JUDGE" else "rules"] += 1
+        m.routing[d.route] += 1
+        if d.trace is not None:
+            for c in d.trace.calls:
+                (m.cache_hits if c.cached else m.calls)[c.tier] += 1
+                m.max_tokens_stops[c.tier] += c.stop_reason == "max_tokens"
+            m.cost = None if m.cost is None or d.trace.cost is None else m.cost + d.trace.cost
         ok = d.outcome in lab["allowed_outcomes"]
         m.allowed_ok += ok
         if not ok:
@@ -128,6 +146,13 @@ def score(decisions: dict[str, Decision], plan: dict, records: Records) -> Metri
     return m
 
 
+def _cost_line(m: Metrics) -> str:
+    if m.cost is None:
+        return "Cost: unknown (a model has no price in config.PRICES)"
+    per = m.cost / m.n if m.n else Decimal("0")
+    return f"Cost: total ${m.cost:.6f}, per SAP vendor ${per:.6f}"
+
+
 def summary_lines(m: Metrics) -> list[str]:
     return [
         f"Wrong merges (target 0): {len(m.wrong_merges)}" + (f"  {', '.join(m.wrong_merges)}" if m.wrong_merges else ""),
@@ -138,8 +163,12 @@ def summary_lines(m: Metrics) -> list[str]:
         f"Outcome allowed by plan: {m.allowed_ok}/{m.n} = {_pct(_ratio(m.allowed_ok, m.n))}",
         f"NEEDS_HUMAN rate: {m.needs_human}/{m.n} = {_pct(_ratio(m.needs_human, m.n))}",
         f"Fraud / conflict / ambiguous flags caught (rows planted NEEDS_HUMAN): {m.flag_caught}/{m.flag_rows}",
-        "Routing: " + ", ".join(f"{k} {v}" for k, v in sorted(m.routing.items())) + "; Haiku 0, Sonnet 0 (no model yet)",
-        "Cost per SAP vendor: $0 (no model calls in this method)",
+        "Routing share (who decided): " + ", ".join(
+            f"{r} {m.routing[r]} ({_pct(_ratio(m.routing[r], m.n))})" for r in ROUTES),
+        "Model calls per tier: " + ", ".join(
+            f"{t} {m.calls[t]} (cache hits {m.cache_hits[t]}, max_tokens stops {m.max_tokens_stops[t]})"
+            for t in TIERS),
+        _cost_line(m),
         f"Dollars exposed on duplicates: found ${m.dollars_found:,.2f} of planted ${m.dollars_planted:,.2f}",
     ]
 
@@ -168,20 +197,25 @@ def write_report(path: Path, method: str, split: str, header: list[str], m: Metr
 
 def evaluate(method: str, split: str, records: Records, plan: dict, embedder: CachedEmbedder | None,
              embedder_kind: str, limit: int | None = None, reports_dir: Path | None = None,
-             data_dir: Path | None = None) -> tuple[Metrics, Path]:
+             data_dir: Path | None = None, judge: Judge | None = None) -> tuple[Metrics, Path]:
     if split not in SPLITS:
         raise ValueError(f"unknown split {split!r}")
     rows = select_rows(plan, split, limit)
     t_low, t_high, source = config.thresholds(embedder_kind, data_dir)
-    decisions = run_method(method, records, rows, embedder if method == "embed" else None, t_low, t_high)
+    uses_embedder = method == "embed" or method in MODEL_METHODS
+    decisions = run_method(method, records, rows, embedder if uses_embedder else None, t_low, t_high, judge)
     m = score(decisions, plan, records)
     header = [f"Rows: {len(rows)}" + (f" (limit {limit})" if limit else "")]
-    if method == "embed":
+    if uses_embedder:
         header += [f"Embedder: {embedder_kind} ({embedder.name})",
                    f"Thresholds: T_LOW {t_low:.2f}, T_HIGH {t_high:.2f} from {source}",
                    f"Embeddings computed {embedder.computed}, cache hits {embedder.hits}"]
         if embedder_kind == "fake":
             header.append("FakeEmbedder numbers are for tests only; real numbers come from --embedder local.")
+    if method in MODEL_METHODS:
+        header += [f"Models: cheap {judge.cheap}, strong {judge.strong}; prompt {PROMPT_VERSION}; "
+                   f"max_tokens {config.MAX_TOKENS}",
+                   "Response cache: " + ("on" if judge.cache.use_cache else "off (--no-cache)")]
     elif method == "fuzzy":
         header.append("difflib ratio >= 0.90 on normalized names, same country")
     path = Path(reports_dir or config.REPORTS_DIR) / f"eval_{method}_{split}.md"

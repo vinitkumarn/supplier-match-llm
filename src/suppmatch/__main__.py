@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections import Counter
 
 from . import config
 from .db import load_all
 from .embed import get_embedder
-from .evaluate import METHODS, SPLITS, evaluate, summary_lines
+from .audit import AuditLog
+from .evaluate import METHODS, MODEL_METHODS, SPLITS, evaluate, summary_lines
 from .generator import generate, load_plan
+from .judge import Judge, ResponseCache
 from .records import load_records
 from .tune import tune, write_outputs
 
@@ -58,11 +61,30 @@ def cmd_tune(args: argparse.Namespace) -> None:
         print("FakeEmbedder thresholds are for tests only. Run 'python -m suppmatch tune --embedder local' before a real eval.")
 
 
+def _setup_logging() -> None:
+    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=config.LOG_DIR / "suppmatch.log", level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s", encoding="utf-8")
+
+
+def _make_judge(args: argparse.Namespace) -> Judge:
+    try:
+        import anthropic  # the real client; only needed for model methods
+    except ImportError:
+        sys.exit("The anthropic package is not installed. Run: python -m pip install -r requirements.txt")
+    audit = AuditLog(config.LOG_DIR / f"audit_{args.method}_{args.split}.jsonl")
+    return Judge(anthropic.Anthropic(), ResponseCache(use_cache=not args.no_cache), audit)
+
+
 def cmd_eval(args: argparse.Namespace) -> None:
     records, plan = _inputs()
-    embedder = get_embedder(args.embedder, use_cache=not args.no_cache) if args.method == "embed" else None
+    _setup_logging()
+    needs_embedder = args.method == "embed" or args.method in MODEL_METHODS
+    embedder = get_embedder(args.embedder, use_cache=not args.no_cache) if needs_embedder else None
+    judge = _make_judge(args) if args.method in MODEL_METHODS else None
     try:
-        m, path = evaluate(args.method, args.split, records, plan, embedder, args.embedder, args.limit)
+        m, path = evaluate(args.method, args.split, records, plan, embedder, args.embedder, args.limit,
+                           judge=judge)
     except RuntimeError as exc:
         sys.exit(str(exc))
     print(f"{args.method} on {args.split} ({m.n} rows)")
@@ -73,6 +95,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
     for line in summary_lines(m):
         print("  " + line)
     print(f"Wrote {path}")
+    if judge is not None:
+        print(f"Audit trail: {judge.audit.path}; full errors in {config.LOG_DIR / 'suppmatch.log'}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -92,7 +116,7 @@ def main(argv: list[str] | None = None) -> None:
     ev.add_argument("--split", choices=SPLITS, default="dev")
     ev.add_argument("--limit", type=int, default=None, help="only the first N SAP vendors of the split")
     ev.add_argument("--embedder", choices=["local", "fake"], default="local")
-    ev.add_argument("--no-cache", action="store_true", help="do not read or write the embedding cache")
+    ev.add_argument("--no-cache", action="store_true", help="do not read or write the embedding or response cache")
     ev.set_defaults(func=cmd_eval)
 
     args = parser.parse_args(argv)

@@ -26,6 +26,8 @@ class Vendor:
     tax: str                               # normalized, "" = missing
     bank: tuple[str, str, str] | None      # (country, bank key, account), None = missing
     last4: str
+    name1: str = ""                        # raw SAP NAME1 / NAME2 (shown to the judge as UNTRUSTED)
+    name2: str = ""
 
     @property
     def norm_name(self) -> str:
@@ -54,7 +56,8 @@ def load_records(db_path: Path) -> Records:
             b = sap_bank.get(lifnr)
             ident = bank_identity(*b) if b else None
             sap[lifnr] = Vendor(lifnr, sap_name(n1, n2), _s(stras), _s(ort), _s(pstlz), _s(land),
-                                normalize_tax_id(stcd, land), ident, ident[2][-4:] if ident else "")
+                                normalize_tax_id(stcd, land), ident, ident[2][-4:] if ident else "",
+                                _s(n1), _s(n2))
 
         # One site and at most one bank account per Fusion vendor in this data; take the first.
         sites = {}

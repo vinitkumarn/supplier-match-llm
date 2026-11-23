@@ -1,9 +1,11 @@
 from conftest import vendor
+from fakes import ScriptedClient, quoting
 
 from suppmatch import evaluate as ev
 from suppmatch.baselines import embed_only, exact, fuzzy
 from suppmatch.candidates import build_candidates
 from suppmatch.decide import MATCH, NEEDS_HUMAN, TAX_CONFLICT
+from suppmatch.judge import Judge, ResponseCache
 
 
 def test_lookalike_with_tax_different_never_match_crafted(fake_embedder):
@@ -16,14 +18,16 @@ def test_lookalike_with_tax_different_never_match_crafted(fake_embedder):
         assert embed_only(cands, t_low, t_high).outcome != MATCH
 
 
-def test_planted_never_match_rows_never_match_in_any_method(built, records, fake_embedder):
+def test_planted_never_match_rows_never_match_in_any_method(built, records, fake_embedder, tmp_path):
     plan = built["plan"]
     never = sorted(k for k, v in plan["vendors"].items() if MATCH not in v["allowed_outcomes"])
     lookalikes = [k for k in never if plan["vendors"][k]["group"] == "LOOKALIKE"]
     assert len(lookalikes) == 15
     for method in ev.METHODS:
         for t_low, t_high in [(0.0, 0.5), (0.6, 0.9)]:
-            decisions = ev.run_method(method, records, never, fake_embedder, t_low, t_high)
+            # the model always says SAME (with valid quotes): Python must still block every MATCH
+            judge = Judge(ScriptedClient(quoting("SAME")), ResponseCache(tmp_path, use_cache=False))
+            decisions = ev.run_method(method, records, never, fake_embedder, t_low, t_high, judge)
             assert not [k for k, d in decisions.items() if d.outcome == MATCH], method
 
 
@@ -56,3 +60,21 @@ def test_split_selection_and_limit(built):
         rows = ev.select_rows(plan, split)
         assert rows and all(plan["vendors"][k]["split"] == split for k in rows)
     assert len(ev.select_rows(plan, "heldout", 5)) == 5
+
+
+def test_routed_and_sonnet_only_reports(built, records, fake_embedder, tmp_path):
+    out = {}
+    for method in ("routed", "sonnet-only"):
+        client = ScriptedClient(quoting("UNSURE"))
+        judge = Judge(client, ResponseCache(tmp_path / method))
+        m, path = ev.evaluate(method, "dev", records, built["plan"], fake_embedder, "fake",
+                              reports_dir=tmp_path, data_dir=tmp_path, judge=judge)
+        text = path.read_text(encoding="utf-8")
+        assert "Routing share" in text and "Model calls per tier" in text and "per SAP vendor" in text
+        assert sum(m.routing.values()) == m.n and m.routing["haiku"] == m.routing["sonnet"] == 0
+        assert m.cost > 0 and m.cost is not None
+        out[method] = (m, client)
+    routed, sonnet = out["routed"][0], out["sonnet-only"][0]
+    assert routed.calls["haiku"] == routed.calls["sonnet"] == sonnet.calls["sonnet"] > 0
+    assert sonnet.calls["haiku"] == 0
+    assert routed.routing["human"] == sonnet.routing["human"]

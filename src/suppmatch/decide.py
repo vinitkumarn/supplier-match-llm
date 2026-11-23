@@ -1,13 +1,14 @@
 """Decision rules (docs/design.md, "Decision rules"). Python owns every outcome and flag.
 
 Order: FRAUD -> SURE MATCH -> AMBIGUOUS -> CONFLICT -> SURE NEW -> needs judge (middle band).
-The model (a later PR) only ever sees the "needs judge" rows and returns a verdict; Python
-turns that verdict into an outcome, and a hard conflict still blocks MATCH.
+The model (judge.py) only ever sees the "needs judge" rows and returns a verdict; Python
+turns that verdict into an outcome (apply_verdict), and a hard conflict still blocks MATCH.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from .candidates import DIFFERENT, SAME, Candidate
 
@@ -23,6 +24,8 @@ class Decision:
     flags: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     candidate: Candidate | None = None  # the pair the decision is about (or the one to judge)
+    route: str = "rules"                # who decided: rules / haiku / sonnet / human
+    trace: Any = None                   # judge.JudgeTrace for rows the model saw
 
     @property
     def needs_judge(self) -> bool:
@@ -95,6 +98,26 @@ def decide(cands: list[Candidate], t_low: float, t_high: float) -> Decision:
     if best.full_cosine < t_low and not any(c.tax == SAME for c in cands):
         return Decision(NEW, "SURE_NEW", reasons=[f"best full_cosine {best.full_cosine:.3f} < T_LOW"])
 
-    # 6. The unclear middle: the judge decides (later PR). Conflict flags travel with it.
+    # 6. The unclear middle: the judge decides (judge.py, then apply_verdict). Conflict flags travel with it.
     return Decision(None, "NEEDS_JUDGE", best.vendor_id, conflict_flags(best),
                     [f"middle band: best full_cosine {best.full_cosine:.3f}"], best)
+
+
+def apply_verdict(d: Decision, verdict: str | None, route: str, why: str) -> Decision:
+    """Turn the judge's verdict on a NEEDS_JUDGE row into an outcome.
+
+    SAME -> MATCH through guard_match (a FRAUD / TAX / BANK conflict still ends NEEDS_HUMAN);
+    DIFFERENT -> NEW; UNSURE, an invalid answer or a guard failure (verdict None) -> NEEDS_HUMAN.
+    """
+    c = d.candidate
+    assert d.needs_judge and c is not None
+    if verdict == "SAME":
+        out = guard_match(c, "JUDGE_SAME", why)
+    elif verdict == "DIFFERENT":
+        out = Decision(NEW, "JUDGE_DIFFERENT", None, list(d.flags), [why], c)
+    else:
+        rule = "JUDGE_UNSURE" if verdict == "UNSURE" else "JUDGE_INVALID"
+        out = Decision(NEEDS_HUMAN, rule, c.vendor_id, list(d.flags), [why], c)
+    out.reasons = d.reasons + out.reasons
+    out.route = route
+    return out
