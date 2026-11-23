@@ -4,7 +4,7 @@ from fakes import ScriptedClient, quoting
 from suppmatch import evaluate as ev
 from suppmatch.baselines import embed_only, exact, fuzzy
 from suppmatch.candidates import build_candidates
-from suppmatch.decide import MATCH, NEEDS_HUMAN, TAX_CONFLICT
+from suppmatch.decide import MATCH, NEEDS_HUMAN, NEW, TAX_CONFLICT, Decision
 from suppmatch.judge import Judge, ResponseCache
 
 
@@ -52,6 +52,21 @@ def test_evaluate_writes_report(built, records, fake_embedder, tmp_path):
     assert path == tmp_path / "eval_embed_dev.md"
     text = path.read_text(encoding="utf-8")
     assert "Wrong merges" in text and "placeholder" in text
+
+
+def test_flag_on_allowed_new_counts_as_caught(built, records):
+    plan = built["plan"]
+    k = next(k for k, v in plan["vendors"].items()
+             if v["expected_outcome"] == NEEDS_HUMAN and v["expected_flags"] == [TAX_CONFLICT]
+             and NEW in v["allowed_outcomes"])
+    one = {"vendors": {k: plan["vendors"][k]}}
+    with_flag = ev.score({k: Decision(NEW, "JUDGE_DIFFERENT", None, [TAX_CONFLICT])}, one, records)
+    assert (with_flag.flag_caught, with_flag.flag_rows, with_flag.flag_caught_by[TAX_CONFLICT]) == (1, 1, 1)
+    without = ev.score({k: Decision(NEW, "SURE_NEW")}, one, records)
+    assert (without.flag_caught, without.flag_caught_by[TAX_CONFLICT]) == (0, 0)
+    # NEW where the plan does not allow NEW is never "caught", flag or not
+    strict = {"vendors": {k: {**plan["vendors"][k], "allowed_outcomes": [NEEDS_HUMAN]}}}
+    assert ev.score({k: Decision(NEW, "JUDGE_DIFFERENT", None, [TAX_CONFLICT])}, strict, records).flag_caught == 0
 
 
 def test_split_selection_and_limit(built):

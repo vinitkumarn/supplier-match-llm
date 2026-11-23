@@ -12,12 +12,12 @@ from suppmatch.judge import Judge, ResponseCache
 from suppmatch.proposal import CALL_BACK, build_rows, totals, write_proposal
 
 
-def _routed_rows(built, records, fake_embedder, tmp_path, split=None):
-    """Routed run with a model that always says SAME and a wide middle band (most rows reach it)."""
+def _routed_rows(built, records, fake_embedder, tmp_path, split=None, verdict="SAME"):
+    """Routed run with a model that always gives one verdict and a wide middle band (most rows reach it)."""
     plan = built["plan"]
     splits = [split] if split else ev.SPLITS
     lifnrs = [k for s in splits for k in ev.select_rows(plan, s)]
-    judge = Judge(ScriptedClient(quoting("SAME")), ResponseCache(tmp_path / "resp", use_cache=False))
+    judge = Judge(ScriptedClient(quoting(verdict)), ResponseCache(tmp_path / "resp", use_cache=False))
     decisions = ev.run_method("routed", records, lifnrs, fake_embedder, 0.0, 0.99, judge)
     return build_rows(decisions, records)
 
@@ -84,6 +84,25 @@ def test_tax_conflict_lookalike_is_under_review_not_exposed(built, records, fake
         assert r.survivor == ""
     t = totals(list(rows.values()))
     assert t["dollars_exposed"] == sum(r.dollars_exposed for r in rows.values() if r.outcome == MATCH)
+
+
+def test_tax_conflict_lookalike_judged_different_is_new_with_flag(built, records, fake_embedder, tmp_path):
+    plan = built["plan"]
+    rows = {r.sap_lifnr: r for r in _routed_rows(built, records, fake_embedder, tmp_path, verdict="DIFFERENT")}
+    lookalikes = [k for k, v in plan["vendors"].items()
+                  if v["group"] == "LOOKALIKE" and TAX_CONFLICT in v["expected_flags"]]
+    hit = [rows[k] for k in lookalikes if rows[k].outcome == NEW and TAX_CONFLICT in rows[k].flags]
+    assert hit, "the model said DIFFERENT: NEW, but the TAX_CONFLICT flag stays on the row"
+    for r in hit:
+        assert r.fusion_vendor_id is None and r.dollars_exposed is None and r.dollars_under_review is None
+        assert "closest Fusion supplier has a different tax ID" in r.reason
+    csv_path, md_path = write_proposal(list(rows.values()), "routed", "all", tmp_path)
+    with csv_path.open(encoding="utf-8", newline="") as fh:
+        data = {d["sap_lifnr"]: d for d in csv.DictReader(fh)}
+    md = md_path.read_text(encoding="utf-8")
+    for r in hit:
+        assert data[r.sap_lifnr]["outcome"] == NEW and "TAX_CONFLICT" in data[r.sap_lifnr]["flags"]
+        assert any(l.startswith(f"| {r.sap_lifnr} | NEW |") and "TAX_CONFLICT" in l for l in md.splitlines())
 
 
 def test_bank_note_never_copies_sap_bank(built, records, fake_embedder, tmp_path):

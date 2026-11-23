@@ -92,6 +92,23 @@ def test_same_on_conflict_pair_is_needs_human(tmp_path, tax, bank, flag):
     assert d.outcome == NEEDS_HUMAN and flag in d.flags
 
 
+@pytest.mark.parametrize("tax,bank,flag,words", [(DIFFERENT, MISSING, TAX_CONFLICT, "different tax ID"),
+                                                 (MISSING, DIFFERENT, BANK_CONFLICT, "different bank account")])
+def test_different_on_conflict_pair_is_new_and_keeps_flag(tmp_path, tax, bank, flag, words):
+    """Lookalike with a conflict, judge says DIFFERENT: NEW, flag kept as information only."""
+    j, _ = make_judge(quoting("DIFFERENT"), tmp_path)
+    d = j.decide(*middle_pair(tax=tax, bank=bank), T_LOW, T_HIGH)
+    assert (d.outcome, d.rule, d.fusion_vendor_id) == (NEW, "JUDGE_DIFFERENT", None)
+    assert d.flags == [flag]
+    assert any(f"closest Fusion supplier has a {words}" in r for r in d.reasons)
+
+
+def test_different_without_conflict_has_no_flag(tmp_path):
+    j, _ = make_judge(quoting("DIFFERENT"), tmp_path)
+    d = j.decide(*middle_pair(), T_LOW, T_HIGH)
+    assert d.outcome == NEW and d.flags == [] and not any("closest Fusion" in r for r in d.reasons)
+
+
 # --- guards ------------------------------------------------------------------
 
 def _fixed(text):

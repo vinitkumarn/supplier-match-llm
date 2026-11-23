@@ -96,7 +96,7 @@ class Metrics:
     # look at. Kept apart from dollars_found; the two are never added together.
     dollars_under_review: Decimal = Decimal("0")
     flag_rows_by: Counter = field(default_factory=Counter)    # rows planted NEEDS_HUMAN with that flag
-    flag_caught_by: Counter = field(default_factory=Counter)  # of those, NEEDS_HUMAN with that flag
+    flag_caught_by: Counter = field(default_factory=Counter)  # of those, NEEDS_HUMAN (or allowed NEW) with that flag
 
     @property
     def recall(self) -> float | None:
@@ -146,14 +146,16 @@ def score(decisions: dict[str, Decision], plan: dict, records: Records) -> Metri
         if lab["expected_outcome"] == NEW:
             m.new_expected += 1
             m.new_correct += d.outcome == NEW
-        # plan.json: expected_flags apply "when the row ends as NEEDS_HUMAN"; count the rows
-        # planted as NEEDS_HUMAN (a LOOKALIKE planted as NEW needs no flag).
+        # plan.json: count the rows planted as NEEDS_HUMAN with flags (a LOOKALIKE planted as NEW
+        # needs no flag). The flag is caught if it is on the row and the row ends NEEDS_HUMAN, or
+        # NEW where the plan allows NEW (the judge said DIFFERENT; the flag stays as information).
         if lab["expected_flags"] and lab["expected_outcome"] == NEEDS_HUMAN:
             m.flag_rows += 1
-            m.flag_caught += d.outcome == NEEDS_HUMAN and set(lab["expected_flags"]) <= set(d.flags)
+            shown = d.outcome == NEEDS_HUMAN or (d.outcome == NEW and NEW in lab["allowed_outcomes"])
+            m.flag_caught += shown and set(lab["expected_flags"]) <= set(d.flags)
             for f in lab["expected_flags"]:
                 m.flag_rows_by[f] += 1
-                m.flag_caught_by[f] += d.outcome == NEEDS_HUMAN and f in d.flags
+                m.flag_caught_by[f] += shown and f in d.flags
     return m
 
 
@@ -173,7 +175,7 @@ def summary_lines(m: Metrics) -> list[str]:
         f"NEW accuracy: {m.new_correct}/{m.new_expected} = {_pct(_ratio(m.new_correct, m.new_expected))}",
         f"Outcome allowed by plan: {m.allowed_ok}/{m.n} = {_pct(_ratio(m.allowed_ok, m.n))}",
         f"NEEDS_HUMAN rate: {m.needs_human}/{m.n} = {_pct(_ratio(m.needs_human, m.n))}",
-        f"Fraud / conflict / ambiguous flags caught (rows planted NEEDS_HUMAN): {m.flag_caught}/{m.flag_rows}"
+        f"Fraud / conflict / ambiguous flags caught (rows planted NEEDS_HUMAN; NEEDS_HUMAN or allowed NEW with the flag):{m.flag_caught}/{m.flag_rows}"
         + " (" + ", ".join(f"{f} {m.flag_caught_by[f]}/{m.flag_rows_by[f]}" for f in FLAG_TYPES) + ")",
         "Routing share (who decided): " + ", ".join(
             f"{r} {m.routing[r]} ({_pct(_ratio(m.routing[r], m.n))})" for r in ROUTES),

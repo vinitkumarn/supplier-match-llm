@@ -15,6 +15,12 @@ from .candidates import DIFFERENT, SAME, Candidate
 MATCH, NEW, NEEDS_HUMAN = "MATCH", "NEW", "NEEDS_HUMAN"
 FRAUD_FLAG, TAX_CONFLICT, BANK_CONFLICT, AMBIGUOUS = "FRAUD_FLAG", "TAX_CONFLICT", "BANK_CONFLICT", "AMBIGUOUS"
 
+# Shown on a NEW row that still carries a conflict flag (judge said DIFFERENT): information only.
+INFO_NOTES = {
+    TAX_CONFLICT: "closest Fusion supplier has a different tax ID (information only)",
+    BANK_CONFLICT: "closest Fusion supplier has a different bank account (information only)",
+}
+
 
 @dataclass
 class Decision:
@@ -107,14 +113,16 @@ def apply_verdict(d: Decision, verdict: str | None, route: str, why: str) -> Dec
     """Turn the judge's verdict on a NEEDS_JUDGE row into an outcome.
 
     SAME -> MATCH through guard_match (a FRAUD / TAX / BANK conflict still ends NEEDS_HUMAN);
-    DIFFERENT -> NEW; UNSURE, an invalid answer or a guard failure (verdict None) -> NEEDS_HUMAN.
+    DIFFERENT -> NEW, keeping the closest candidate's TAX / BANK conflict flag as information
+    for the reviewer; UNSURE, an invalid answer or a guard failure (verdict None) -> NEEDS_HUMAN.
     """
     c = d.candidate
     assert d.needs_judge and c is not None
     if verdict == "SAME":
         out = guard_match(c, "JUDGE_SAME", why)
     elif verdict == "DIFFERENT":
-        out = Decision(NEW, "JUDGE_DIFFERENT", None, list(d.flags), [why], c)
+        notes = [INFO_NOTES[f] for f in d.flags if f in INFO_NOTES]
+        out = Decision(NEW, "JUDGE_DIFFERENT", None, list(d.flags), [why] + notes, c)
     else:
         rule = "JUDGE_UNSURE" if verdict == "UNSURE" else "JUDGE_INVALID"
         out = Decision(NEEDS_HUMAN, rule, c.vendor_id, list(d.flags), [why], c)
