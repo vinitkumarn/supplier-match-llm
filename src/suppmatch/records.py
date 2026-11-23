@@ -41,6 +41,12 @@ class Records:
     sap_open: dict[str, Decimal]       # LIFNR -> sum of open items
     fusion_open: dict[int, Decimal]    # vendor_id -> sum of open AP
 
+    def pair_open(self, lifnr: str, vendor_id: int | None) -> Decimal:
+        """SAP open items + Fusion open AP for one SAP vendor and one Fusion supplier."""
+        zero = Decimal("0.00")
+        fus = self.fusion_open.get(vendor_id, zero) if vendor_id is not None else zero
+        return self.sap_open.get(lifnr, zero) + fus
+
 
 def _s(value) -> str:
     return "" if value is None else str(value)

@@ -7,6 +7,7 @@ risks a double payment. Both matter, but a wrong merge is worse.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -15,7 +16,7 @@ from pathlib import Path
 from . import config
 from .baselines import embed_only, exact, fuzzy
 from .candidates import build_candidates
-from .decide import MATCH, NEEDS_HUMAN, NEW, Decision
+from .decide import AMBIGUOUS, BANK_CONFLICT, FRAUD_FLAG, MATCH, NEEDS_HUMAN, NEW, TAX_CONFLICT, Decision
 from .embed import CachedEmbedder
 from .judge import PROMPT_VERSION, ROUTED, SONNET_ONLY, Judge
 from .records import Records
@@ -25,6 +26,7 @@ METHODS = ("exact", "fuzzy", "embed") + MODEL_METHODS
 ROUTES = ("rules", "haiku", "sonnet", "human")
 TIERS = ("haiku", "sonnet")
 SPLITS = ("dev", "heldout", "redteam")
+FLAG_TYPES = (FRAUD_FLAG, TAX_CONFLICT, BANK_CONFLICT, AMBIGUOUS)
 
 
 def select_rows(plan: dict, split: str, limit: int | None = None) -> list[str]:
@@ -82,14 +84,19 @@ class Metrics:
     flag_rows: int
     flag_caught: int
     routing: Counter
-    dollars_planted: Decimal
-    dollars_found: Decimal
+    dollars_planted: Decimal            # planted duplicates: SAP open + Fusion open of the real pair
+    dollars_found: Decimal              # of those, the ones suggested MATCH to the right Fusion supplier
     by_group: dict[str, Counter] = field(default_factory=dict)
     misses: list[str] = field(default_factory=list)
     calls: Counter = field(default_factory=Counter)        # real API calls per tier (retries included)
     cache_hits: Counter = field(default_factory=Counter)   # response-cache answers per tier
     max_tokens_stops: Counter = field(default_factory=Counter)  # calls cut off at max_tokens, per tier
     cost: Decimal | None = Decimal("0")                    # None if a model has no price
+    # NEEDS_HUMAN rows with a Fusion vendor: SAP open + Fusion open of the pair a person must
+    # look at. Kept apart from dollars_found; the two are never added together.
+    dollars_under_review: Decimal = Decimal("0")
+    flag_rows_by: Counter = field(default_factory=Counter)    # rows planted NEEDS_HUMAN with that flag
+    flag_caught_by: Counter = field(default_factory=Counter)  # of those, NEEDS_HUMAN with that flag
 
     @property
     def recall(self) -> float | None:
@@ -124,14 +131,15 @@ def score(decisions: dict[str, Decision], plan: dict, records: Records) -> Metri
             m.correct_matches += not is_wrong_merge(d, lab)
         if d.outcome == NEEDS_HUMAN:
             m.needs_human += 1
+            if d.fusion_vendor_id is not None:
+                m.dollars_under_review += records.pair_open(k, d.fusion_vendor_id)
         target = lab["expected_fusion_vendor_id"]
         if lab["expected_outcome"] == MATCH:
             m.duplicates += 1
-            exposed = records.sap_open.get(k, Decimal("0")) + records.fusion_open.get(target, Decimal("0"))
+            exposed = records.pair_open(k, target)
             m.dollars_planted += exposed
             if d.outcome == MATCH and d.fusion_vendor_id == target:
                 m.duplicates_found += 1
-            if d.outcome in (MATCH, NEEDS_HUMAN) and d.fusion_vendor_id == target:
                 m.dollars_found += exposed
             if d.outcome == NEW:
                 m.duplicates_sent_new.append(k)
@@ -143,6 +151,9 @@ def score(decisions: dict[str, Decision], plan: dict, records: Records) -> Metri
         if lab["expected_flags"] and lab["expected_outcome"] == NEEDS_HUMAN:
             m.flag_rows += 1
             m.flag_caught += d.outcome == NEEDS_HUMAN and set(lab["expected_flags"]) <= set(d.flags)
+            for f in lab["expected_flags"]:
+                m.flag_rows_by[f] += 1
+                m.flag_caught_by[f] += d.outcome == NEEDS_HUMAN and f in d.flags
     return m
 
 
@@ -162,15 +173,48 @@ def summary_lines(m: Metrics) -> list[str]:
         f"NEW accuracy: {m.new_correct}/{m.new_expected} = {_pct(_ratio(m.new_correct, m.new_expected))}",
         f"Outcome allowed by plan: {m.allowed_ok}/{m.n} = {_pct(_ratio(m.allowed_ok, m.n))}",
         f"NEEDS_HUMAN rate: {m.needs_human}/{m.n} = {_pct(_ratio(m.needs_human, m.n))}",
-        f"Fraud / conflict / ambiguous flags caught (rows planted NEEDS_HUMAN): {m.flag_caught}/{m.flag_rows}",
+        f"Fraud / conflict / ambiguous flags caught (rows planted NEEDS_HUMAN): {m.flag_caught}/{m.flag_rows}"
+        + " (" + ", ".join(f"{f} {m.flag_caught_by[f]}/{m.flag_rows_by[f]}" for f in FLAG_TYPES) + ")",
         "Routing share (who decided): " + ", ".join(
             f"{r} {m.routing[r]} ({_pct(_ratio(m.routing[r], m.n))})" for r in ROUTES),
         "Model calls per tier: " + ", ".join(
             f"{t} {m.calls[t]} (cache hits {m.cache_hits[t]}, max_tokens stops {m.max_tokens_stops[t]})"
             for t in TIERS),
         _cost_line(m),
-        f"Dollars exposed on duplicates: found ${m.dollars_found:,.2f} of planted ${m.dollars_planted:,.2f}",
+        f"Dollars exposed (duplicates suggested MATCH): found ${m.dollars_found:,.2f} of planted ${m.dollars_planted:,.2f}",
+        f"Dollars under review (NEEDS_HUMAN pairs, a person decides; not added to the above): ${m.dollars_under_review:,.2f}",
     ]
+
+
+def _money(x: Decimal | None) -> str | None:
+    return None if x is None else str(x)
+
+
+def metrics_dict(m: Metrics, method: str, split: str, extra: dict) -> dict:
+    """The numbers behind the md report, as plain JSON (compare.py reads this, never the md).
+    Money is written as a string so the Decimal comes back exactly."""
+    per_vendor = None if m.cost is None else (m.cost / m.n if m.n else Decimal("0"))
+    return {
+        "method": method, "split": split, "n": m.n,
+        "wrong_merges": len(m.wrong_merges), "wrong_merge_ids": m.wrong_merges,
+        "duplicates": m.duplicates, "duplicates_found": m.duplicates_found, "recall": m.recall,
+        "duplicates_sent_new": len(m.duplicates_sent_new),
+        "matches_made": m.matches_made, "correct_matches": m.correct_matches, "precision": m.precision,
+        "new_expected": m.new_expected, "new_correct": m.new_correct,
+        "new_accuracy": _ratio(m.new_correct, m.new_expected),
+        "allowed_ok": m.allowed_ok,
+        "needs_human": m.needs_human, "needs_human_rate": _ratio(m.needs_human, m.n),
+        "flags": {f: {"caught": m.flag_caught_by[f], "planted": m.flag_rows_by[f]} for f in FLAG_TYPES},
+        "routing": {r: m.routing[r] for r in ROUTES},
+        "calls": {t: m.calls[t] for t in TIERS},
+        "cache_hits": {t: m.cache_hits[t] for t in TIERS},
+        "max_tokens_stops": {t: m.max_tokens_stops[t] for t in TIERS},
+        "cost_total": _money(m.cost), "cost_per_vendor": _money(per_vendor),
+        "dollars_exposed_found": _money(m.dollars_found),
+        "dollars_exposed_planted": _money(m.dollars_planted),
+        "dollars_under_review": _money(m.dollars_under_review),
+        **extra,
+    }
 
 
 def write_report(path: Path, method: str, split: str, header: list[str], m: Metrics,
@@ -220,4 +264,12 @@ def evaluate(method: str, split: str, records: Records, plan: dict, embedder: Ca
         header.append("difflib ratio >= 0.90 on normalized names, same country")
     path = Path(reports_dir or config.REPORTS_DIR) / f"eval_{method}_{split}.md"
     write_report(path, method, split, header, m, decisions, plan)
+    extra = {"limit": limit, "embedder": embedder_kind if uses_embedder else None,
+             "embedder_name": embedder.name if uses_embedder else None,
+             "t_low": t_low if uses_embedder else None, "t_high": t_high if uses_embedder else None,
+             "thresholds_source": source if uses_embedder else None,
+             "embeddings_computed": embedder.computed if uses_embedder else None,
+             "embeddings_cached": embedder.hits if uses_embedder else None}
+    path.with_suffix(".json").write_text(
+        json.dumps(metrics_dict(m, method, split, extra), indent=2) + "\n", encoding="utf-8")
     return m, path
